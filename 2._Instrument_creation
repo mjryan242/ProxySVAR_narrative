@@ -1,0 +1,276 @@
+#####load packages
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+library(tidytext)
+library(ggplot2)
+
+###set drive
+setwd("C:\\Users\\mryan\\Desktop\\RQ2_proxySVAR\\input")
+
+
+#######set global parameters
+
+list<-c("first","last","no")  ####sets how to treats situations where the Hansard volume spans multiple quarters (either allocate to first or last quarter or don't allocate; we don't allocate in the paper)
+threshold<-1/2 ###topic probability cut off (above which we are willing to assign the topic to a mention of uncertainty)
+
+###############################
+for (mthd in list) {
+
+###reads in theta  (this is the file with each mention of uncertainty and the probability of it being associated with each topic)
+theta_raw<-read.csv(file="theta.csv", header=TRUE, sep=",")
+dim(theta_raw)  #total number of uncertainty mentions
+
+
+##keep mentions with max topic probability above certain threshold
+theta_raw$max<-apply(X=theta_raw[ ,2:ncol(theta_raw)], MARGIN=1, FUN=max)
+head(theta_raw)
+###select mentions of uncertainty that we can id with a topic (max prob>threshold)
+theta_id<-theta_raw%>%filter(max>threshold)%>%dplyr::select(-c("max"))
+dim(theta_id) ###2736 (number of mentions of uncertainty that we can assign a topic)
+
+
+#look at all the probabilities and find the topic that is highest
+df_max<-colnames(theta_id)[apply(theta_id,1,which.max)]
+length(df_max)
+
+#####go back to theta_id data set and isolate the unique id of the hansard
+###Qasim read in each volume as a seperate CSV, therefore we can use this as an id 
+theta_id<-theta_id %>% mutate(id_hansard =  sub("\\.csv.*", "", id))%>% 
+mutate(id_hansard =  sub("\\.pdf.*", "", id_hansard))
+
+head(theta_id)
+
+####join ids with topics that max id
+df_1<-as.data.frame(cbind(theta_id$id_hansard,df_max))
+dim(df_1)
+
+colnames(df_1)<-c("id_hansard","Topic_id")
+
+Topic_names<-read.csv(file="Topic_names.csv", header=TRUE, sep=",")
+
+
+
+df3<-left_join(df_1,Topic_names)
+head(df3)
+dim(df3)
+summary(df3)
+
+####select 100 at random for audit
+#set.seed(100)
+#samp <- sample(nrow(df3),100)
+#samp.in <- df3[samp,]
+#write.csv(samp.in,"audit.csv")
+
+table(df3$High_level_topic)
+
+
+#####getting hansard volume dates############################################
+
+####this file has the dates the hansard covers
+dates_LU<-read.csv(file="official_vol_dates_LU.csv", header=TRUE, sep=",")
+head(dates_LU)
+
+words<-c("January",
+"February",
+"March",
+"April",
+"May",
+"June",
+"July",
+"August",
+"September",
+"October",
+"November",
+"December")
+words<-toupper(words)
+dates_LU$date<-toupper(dates_LU$date)
+
+
+tofind <- paste(words, collapse="|")
+
+##finds all the months associated with the date
+month<-(str_extract_all(dates_LU$date, tofind, simplify = TRUE))
+
+#takes the first month from "date" as start of Hansard vol period
+month1<-as.data.frame(month[ ,1])
+
+#takes the second month from "date" as end of Hansard vol period
+month2<-as.data.frame(month[ ,2])
+
+#just checking that each hansard is allocated a start and end month
+month1_df<-as.data.frame(table(month1))
+sum(month1_df$Freq)
+month2_df<-as.data.frame(table(month2))
+sum(month2_df$Freq)
+
+dim(dates_LU)
+#there is one blank in month2
+View(month2)
+
+# row 28 
+dates_LU[28 ,]
+##manually coding it in
+month2[28,1]="FEBRUARY"
+
+###creating a look up table to convert months to quarters
+
+qtrslist<-c(rep("Q1",3),rep("Q2",3),rep("Q3",3),rep("Q4",3))
+qtrs<-as.data.frame(cbind(words,qtrslist))
+qtrs1<-as.data.frame(cbind(words,qtrslist))
+colnames(qtrs)<-c("month","qtr" )
+colnames(qtrs1)<-c("month_last","qtr_last" )
+
+colnames(month1)<-c("month")
+colnames(month2)<-c("month_last")
+
+#allocating quarters to months in hansard
+month1<-left_join(month1,qtrs)
+month2<-left_join(month2,qtrs1)
+
+dates_LU_1<-cbind(dates_LU,month1,month2 )
+head(dates_LU_1,50)
+
+####now finding year of hansard
+years_lu<-seq(1970,2017,by=1)
+tofindyrs <- paste(years_lu, collapse="|")
+
+yr<-(str_extract_all(dates_LU$date, tofindyrs, simplify = TRUE))
+dates_LU_1$intialQ_yr<-yr[ ,1]
+dates_LU_1$finalQ_yr<-yr[ ,2]
+
+###manually putting in last Q years for last few editions as volume structure is different
+dates_LU_1$finalQ_yr[334:345]<-dates_LU_1$intialQ_yr[334:345]
+
+###some volumes do go across years - so I'll have to watch for this 
+#if I move beyond just excluding quarters that scan two quarters
+
+
+colnames(dates_LU_1)[4]<-c("first.month")
+
+if (mthd == "first") {
+dates_LU_1<-dates_LU_1  %>%  mutate(date_Q= paste0(intialQ_yr,qtr))
+}
+
+if (mthd == "last") {
+dates_LU_1<-dates_LU_1  %>%  mutate(date_Q= paste0(finalQ_yr,qtr_last))
+}
+
+if (mthd == "no") {
+dates_LU_1<-dates_LU_1  %>%  mutate(date_Q= ifelse(qtr==qtr_last,paste0(intialQ_yr,qtr),"uncertain"))
+
+}
+
+
+
+#102/length(dates_LU_1$date_Q) #percent of volumes I can't definitely give a Q to
+########################################ends#####################################################
+
+
+
+#################################################################################################
+####merge mentions of uncertainty (and their topic) with hansard volume-to-quarter match
+
+
+##df3 contains  mentions of uncertainty (and their topic)
+head(df3 )
+df3a<-df3 %>% 
+mutate(temp=substr(id_hansard,12,length(id_hansard))) %>%
+mutate(vol=as.numeric(gsub(".*?([0-9]+).*", "\\1", temp)))
+
+####the merge
+temp1<-left_join(df3a,dates_LU_1, by="vol")
+
+
+
+##################################################################
+###identifying uncertainty events
+##################################################################
+###count the number of each of the high-level topics each quarter
+#E=endogenous; F=Firm-specific policy; I=other policy ; O= "other non-policy" ; U = uncertain
+
+temp2<-temp1 %>% group_by(date_Q,High_level_topic) %>%
+tally()%>%
+  spread(High_level_topic ,n)
+
+temp2[is.na(temp2)] <- 0
+
+
+######focus on endogenous and firm-specific topics
+temp3<-temp2 %>% mutate(total=E+F)%>%
+mutate(F_share=(F/total),E_share=(E/total) )  
+summary(temp3)
+View(temp3)
+
+######allocate as an exogenous quarter if no endogenous shocks and at least one firm-specific shock
+####this is the same as saying the share of firm-speciifc shocks is 1 and endogenous shocks is zero
+###as the total is endogenous + firm-specific topics
+temp4<-temp3 %>% mutate(policy_shock=ifelse(F_share==1 & E_share==0 ,1,0 )  ) 
+head(temp4)
+table(temp4$policy_shock)
+
+##########bring in uncertainty measure from previous paper
+uncert<-read.csv(file="Measures_FINAL_weighted.csv", header=TRUE, sep=",")
+tail(uncert)
+
+uncert<-uncert %>% dplyr::select("date_Q","NZL_PC1")
+
+####join uncertainty measure to existing dataset
+shocks_df<-left_join(uncert,temp4)
+shocks_df[is.na(shocks_df)]<-0
+colnames(shocks_df)
+
+
+
+
+
+################################isolating bad news shocks
+##read in data from QSBO 
+news<-read.csv(file="Measures_FINAL_weighted.csv", header=TRUE, sep=",")
+head(news) 
+news<-news %>% dplyr::select("date_Q","i_int_PM", "econ_outlook" ,"i_int_B")
+
+PCAlevels<-princomp(news[ ,c("i_int_PM","i_int_B","econ_outlook") ], cor=T)
+summary_PCA<-summary(PCAlevels)
+PCA_Load<-(PCAlevels$loadings)
+
+screeplot(PCAlevels)
+
+
+shocks_df$PC1<-(PCAlevels$scores[ ,1])
+shocks_df<-shocks_df%>%mutate(dPC1=PC1-lag(PC1))
+shocks_df<-shocks_df[2:nrow(shocks_df), ]
+
+
+
+#create threshold
+news_thres<-mean(shocks_df$dPC1)-1.65*sd(shocks_df$dPC1)
+
+###identify if bad news event if below above threshold
+shocks_df_news<-shocks_df %>% mutate(news_ind=ifelse(dPC1<news_thres,1,0 )) %>%filter(news_ind==1) 
+
+
+#################################
+
+####creating final set of uncertainty events  ("policy_shock_f"); 
+#must meet three conditions: not a news shock (news_ind==0); uncertainty index above average (NZL_PC1>0); and identified as a policy shock
+
+
+shocks_df<-shocks_df %>% mutate(news_ind=ifelse(dPC1<news_thres,1,0 )) %>% mutate(policy_shock_f=ifelse(NZL_PC1>0&policy_shock==1&news_ind==0,1,0)) %>%
+dplyr::select("date_Q","policy_shock_f")
+
+View(shocks_df_news)
+View(shocks_df)
+
+assign( paste0("shocks_df_",mthd) , shocks_df, envir = .GlobalEnv)
+
+}
+ warnings()
+
+View(shocks_df_no)
+events<-shocks_df_no %>% filter(policy_shock_f==1)
+View(events)
+setwd("C:\\Users\\mryan\\Desktop\\RQ2_proxySVAR\\output")
+
+write.csv(shocks_df_no,  "Narrative_IV.csv")
+
